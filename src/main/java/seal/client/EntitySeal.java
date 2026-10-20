@@ -16,9 +16,9 @@ import net.minecraft.util.StatCollector;
 import net.minecraft.world.World;
 
 /**
- * A purely client-side pet. It lives only in the local {@link net.minecraft.client.multiplayer.WorldClient}: it is never
- * sent to the server, never saved and can't be hit or pushed, but it still walks, jumps, swims and pathfinds around
- * blocks with the regular vanilla AI.
+ * A purely client-side pet, ticked and rendered by {@link SealController} rather than the world's entity list. It is
+ * never sent to the server, never saved and can't be hit or pushed, but it still walks, jumps, swims and pathfinds
+ * around blocks with the regular vanilla AI.
  */
 public class EntitySeal extends EntityCreature {
 
