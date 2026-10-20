@@ -41,7 +41,7 @@ public class RenderSeal extends RenderLiving {
         super.rotateCorpse(entity, ageInTicks, yaw, partialTicks);
 
         // Asleep: roll over onto its side, lifted so it rests on the ground instead of sinking into it.
-        float sleep = ((EntitySeal) entity).getSleepAmount(partialTicks);
+        float sleep = ModelSeal.ease(((EntitySeal) entity).getSleepAmount(partialTicks));
         if (sleep > 0.0F) {
             GL11.glTranslatef(0.0F, 0.17F * sleep, 0.0F);
             GL11.glRotatef(80.0F * sleep, 0.0F, 0.0F, 1.0F);

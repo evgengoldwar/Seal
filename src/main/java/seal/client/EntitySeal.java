@@ -12,9 +12,11 @@ import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.init.Items;
 import net.minecraft.item.ItemStack;
 import net.minecraft.nbt.NBTTagCompound;
+import net.minecraft.pathfinding.PathEntity;
 import net.minecraft.util.DamageSource;
 import net.minecraft.util.MathHelper;
 import net.minecraft.util.StatCollector;
+import net.minecraft.util.Vec3;
 import net.minecraft.world.World;
 
 import seal.Seal;
@@ -31,7 +33,18 @@ public class EntitySeal extends EntityCreature {
     private static final int SLEEP_AFTER = 600;
     private static final int SHAKE_DURATION = 16;
 
+    /** Walking speed in blocks per tick at path speed 1.0 (about 1.7 blocks per second). */
+    private static final float WALK_SPEED = 0.085F;
+    /** Speed change per tick when speeding up / slowing down: it takes about a second to get going. */
+    private static final float ACCELERATION = 0.004F;
+    private static final float DECELERATION = 0.012F;
+    /** Fastest the seal may turn, in degrees per tick. */
+    private static final float TURN_RATE = 15.0F;
+    /** How far the head may turn away from the body. */
+    private static final float MAX_HEAD_TURN = 75.0F;
+
     private int jumpCooldown;
+    private float currentSpeed;
     private boolean loggedState;
 
     // Mood and pose. The *Amount values fade between 0 and 1 so the model can blend poses smoothly.
@@ -46,6 +59,7 @@ public class EntitySeal extends EntityCreature {
     private int blinkTicks;
     private int nextBlinkIn = 60;
     private int happyTicks;
+    private float happyAmount, prevHappyAmount;
     private int shakeTicks;
     private boolean wasFar;
     private boolean wasInLiquid;
@@ -70,7 +84,8 @@ public class EntitySeal extends EntityCreature {
     protected void applyEntityAttributes() {
         super.applyEntityAttributes();
         getEntityAttribute(SharedMonsterAttributes.maxHealth).setBaseValue(10.0D);
-        getEntityAttribute(SharedMonsterAttributes.movementSpeed).setBaseValue(0.3D);
+        // 1.0 so that the AI's moveForward is simply the path speed multiplier, see steer().
+        getEntityAttribute(SharedMonsterAttributes.movementSpeed).setBaseValue(1.0D);
         getEntityAttribute(SharedMonsterAttributes.followRange).setBaseValue(32.0D);
     }
 
@@ -197,16 +212,15 @@ public class EntitySeal extends EntityCreature {
             }
         }
 
-        moveStrafing *= 0.98F;
-        moveForward *= 0.98F;
-        travel(moveStrafing, moveForward, inLiquid);
+        steer();
+        travel(inLiquid);
         updateBodyRotation();
         updateLimbSwing();
 
         if (!loggedState && ticksExisted == 40) {
             loggedState = true;
             Seal.LOG.info(
-                "Seal state after 2s: pos=({}, {}, {}) onGround={} inLiquid={} motion=({}, {}, {}) forward={} path={}",
+                "Seal state after 2s: pos=({}, {}, {}) onGround={} inLiquid={} motion=({}, {}, {}) speed={} path={}",
                 posX,
                 posY,
                 posZ,
@@ -215,7 +229,7 @@ public class EntitySeal extends EntityCreature {
                 motionX,
                 motionY,
                 motionZ,
-                moveForward,
+                currentSpeed,
                 !getNavigator().noPath());
         }
     }
@@ -232,6 +246,8 @@ public class EntitySeal extends EntityCreature {
             nextBlinkIn = 50 + rand.nextInt(100);
         }
         if (happyTicks > 0) happyTicks--;
+        prevHappyAmount = happyAmount;
+        happyAmount = approach(happyAmount, happyTicks > 0 ? 1.0F : 0.0F, 0.08F);
         if (shakeTicks > 0) {
             shakeTicks--;
             if (shakeTicks % 2 == 0) spawnParticles("splash", 3, 0.0D);
@@ -293,7 +309,7 @@ public class EntitySeal extends EntityCreature {
     private void celebrate() {
         happyTicks = 40;
         idleTicks = 0;
-        if (onGround) motionY = 0.4D;
+        if (onGround) motionY = 0.3D;
         spawnParticles("heart", 5, height);
     }
 
@@ -338,8 +354,8 @@ public class EntitySeal extends EntityCreature {
         if (begging) idleTicks = 0;
     }
 
-    public boolean isHappy() {
-        return happyTicks > 0;
+    public float getHappyAmount(float partialTicks) {
+        return prevHappyAmount + (happyAmount - prevHappyAmount) * partialTicks;
     }
 
     public boolean areEyesClosed() {
@@ -364,14 +380,47 @@ public class EntitySeal extends EntityCreature {
         return Math.min((SHAKE_DURATION - shakeTicks + partialTicks) / SHAKE_DURATION, 1.0F);
     }
 
-    private void travel(float strafe, float forward, boolean inLiquid) {
+    /**
+     * Turns the AI's wishes into a smooth heading and speed. The move helper snaps rotationYaw towards the next path
+     * point and asks for full speed at once; here the turn is rate-limited and the speed ramps up and down gradually,
+     * slowing down for sharp turns instead of drifting sideways.
+     */
+    private void steer() {
+        float turn = MathHelper.wrapAngleTo180_float(rotationYaw - prevRotationYaw);
+        rotationYaw = prevRotationYaw + MathHelper.clamp_float(turn, -TURN_RATE, TURN_RATE);
+
+        float targetSpeed = Math.max(moveForward, 0.0F) * WALK_SPEED;
+        PathEntity path = getNavigator().getPath();
+        if (targetSpeed > 0.0F && path != null && !path.isFinished()) {
+            Vec3 next = path.getPosition(this);
+            float wantedYaw = (float) (Math.atan2(next.zCoord - posZ, next.xCoord - posX) * 180.0D / Math.PI) - 90.0F;
+            float misalignment = Math.abs(MathHelper.wrapAngleTo180_float(wantedYaw - rotationYaw));
+            if (misalignment > 30.0F) {
+                float rad = Math.min(misalignment, 90.0F) * (float) Math.PI / 180.0F;
+                targetSpeed *= Math.max(0.2F, MathHelper.cos(rad));
+            }
+        }
+
+        if (currentSpeed < targetSpeed) {
+            currentSpeed = Math.min(currentSpeed + ACCELERATION, targetSpeed);
+        } else {
+            currentSpeed = Math.max(currentSpeed - DECELERATION, targetSpeed);
+        }
+        moveForward = 0.0F;
+        moveStrafing = 0.0F;
+    }
+
+    private void travel(boolean inLiquid) {
+        float yawRad = rotationYaw * (float) Math.PI / 180.0F;
+        double wantX = -MathHelper.sin(yawRad) * currentSpeed;
+        double wantZ = MathHelper.cos(yawRad) * currentSpeed;
+
         if (inLiquid) {
             double startY = posY;
-            moveFlying(strafe, forward, 0.04F);
+            motionX += (wantX * 0.9D - motionX) * 0.12D;
+            motionZ += (wantZ * 0.9D - motionZ) * 0.12D;
             moveEntity(motionX, motionY, motionZ);
-            motionX *= 0.8D;
             motionY *= 0.8D;
-            motionZ *= 0.8D;
             motionY -= 0.02D;
             if (isCollidedHorizontally && isOffsetPositionInLiquid(motionX, motionY + 0.6D - posY + startY, motionZ)) {
                 motionY = 0.3D;
@@ -379,47 +428,62 @@ public class EntitySeal extends EntityCreature {
             return;
         }
 
-        float friction = 0.91F;
+        // Grip: how quickly the actual velocity follows the wanted one. Less on ice, very little in the air.
+        double grip = 0.04D;
         if (onGround) {
             Block below = worldObj.getBlock(
                 MathHelper.floor_double(posX),
                 MathHelper.floor_double(boundingBox.minY) - 1,
                 MathHelper.floor_double(posZ));
-            friction = below.slipperiness * 0.91F;
+            grip = 0.35D * 0.6D / below.slipperiness;
         }
-        float accel = onGround ? getAIMoveSpeed() * (0.16277136F / (friction * friction * friction)) : 0.02F;
+        motionX += (wantX - motionX) * grip;
+        motionZ += (wantZ - motionZ) * grip;
 
-        moveFlying(strafe, forward, accel);
         moveEntity(motionX, motionY, motionZ);
 
         motionY -= 0.08D;
         motionY *= 0.98D;
-        motionX *= friction;
-        motionZ *= friction;
     }
 
-    /** Body turns towards where the seal walks; the head may look up to 75 degrees away from it. */
+    /**
+     * The body faces where the seal is heading and turns smoothly; the head follows the body and may look at most
+     * {@link #MAX_HEAD_TURN} degrees to the side. Standing still, the body slowly turns towards where the head looks.
+     */
     private void updateBodyRotation() {
-        double dx = posX - prevPosX;
-        double dz = posZ - prevPosZ;
-        if (dx * dx + dz * dz > 0.0025D) {
-            renderYawOffset += MathHelper.wrapAngleTo180_float(rotationYaw - renderYawOffset) * 0.3F;
+        float target;
+        float maxStep;
+        if (currentSpeed > 0.005F) {
+            target = rotationYaw;
+            maxStep = 12.0F;
+        } else {
+            float headOffset = MathHelper.wrapAngleTo180_float(rotationYawHead - renderYawOffset);
+            target = Math.abs(headOffset) > 50.0F ? rotationYawHead : renderYawOffset;
+            maxStep = 3.0F;
         }
+        float step = MathHelper.wrapAngleTo180_float(target - renderYawOffset) * 0.25F;
+        renderYawOffset += MathHelper.clamp_float(step, -maxStep, maxStep);
 
         float headOffset = MathHelper.wrapAngleTo180_float(rotationYawHead - renderYawOffset);
-        if (headOffset > 75.0F) renderYawOffset += headOffset - 75.0F;
-        if (headOffset < -75.0F) renderYawOffset += headOffset + 75.0F;
+        if (headOffset > MAX_HEAD_TURN) rotationYawHead = renderYawOffset + MAX_HEAD_TURN;
+        if (headOffset < -MAX_HEAD_TURN) rotationYawHead = renderYawOffset - MAX_HEAD_TURN;
     }
 
     private void updateLimbSwing() {
         double dx = posX - prevPosX;
         double dz = posZ - prevPosZ;
         float speed = Math.min(MathHelper.sqrt_double(dx * dx + dz * dz) * 4.0F, 1.0F);
-        limbSwingAmount += (speed - limbSwingAmount) * 0.4F;
+        limbSwingAmount += (speed - limbSwingAmount) * 0.25F;
         limbSwing += limbSwingAmount;
     }
 
     // Keep vanilla code paths that check these consistent with the seal simulating itself.
+
+    /** Slower head nods than vanilla's default 40 degrees per tick. */
+    @Override
+    public int getVerticalFaceSpeed() {
+        return 15;
+    }
 
     @Override
     public boolean isClientWorld() {

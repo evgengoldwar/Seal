@@ -48,6 +48,6 @@ public class SealAIBegForFish extends EntityAIBase {
     public void updateTask() {
         // Look at the fish in the player's hand rather than at their face.
         seal.getLookHelper()
-            .setLookPosition(owner.posX, owner.boundingBox.minY + 1.1D, owner.posZ, 30.0F, seal.getVerticalFaceSpeed());
+            .setLookPosition(owner.posX, owner.boundingBox.minY + 1.1D, owner.posZ, 10.0F, seal.getVerticalFaceSpeed());
     }
 }

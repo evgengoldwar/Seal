@@ -24,8 +24,8 @@ public class ModelSeal extends ModelBase {
     private final ModelRenderer flipperRight;
 
     // Pose of the seal currently being rendered, read from the entity in setLivingAnimations.
-    private float sit, sleep, beg, shake;
-    private boolean happy, scared;
+    private float sit, sleep, beg, shake, happy;
+    private boolean scared;
 
     public ModelSeal() {
         textureWidth = 64;
@@ -84,11 +84,11 @@ public class ModelSeal extends ModelBase {
     public void setLivingAnimations(EntityLivingBase entity, float limbSwing, float limbSwingAmount,
         float partialTicks) {
         EntitySeal seal = (EntitySeal) entity;
-        sit = seal.getSitAmount(partialTicks);
-        sleep = seal.getSleepAmount(partialTicks);
-        beg = seal.getBegAmount(partialTicks);
+        sit = ease(seal.getSitAmount(partialTicks));
+        sleep = ease(seal.getSleepAmount(partialTicks));
+        beg = ease(seal.getBegAmount(partialTicks));
         shake = seal.getShakeProgress(partialTicks);
-        happy = seal.isHappy();
+        happy = ease(seal.getHappyAmount(partialTicks));
         scared = seal.isScared();
     }
 
@@ -97,13 +97,15 @@ public class ModelSeal extends ModelBase {
         float headPitch, float scale, Entity entity) {
         float awake = 1.0F - sleep;
         float move = limbSwingAmount * awake;
-        float phase = limbSwing * 0.9F;
+        float phase = limbSwing * 0.6F;
         float hump = MathHelper.sin(phase) * move;
+        // sin^2: a soft hop that eases in and out of the ground instead of bouncing off it.
+        float hop = MathHelper.sin(phase) * MathHelper.sin(phase) * move;
         float idle = MathHelper.sin(ageInTicks * 0.08F);
 
         // Galumphing: the body rocks back and forth and hops a little, the hips flex the other way.
         // Sitting lifts the front up like a seal on a rock.
-        body.rotationPointY = 24.0F - Math.abs(MathHelper.cos(phase)) * move * 1.2F - sit * 1.0F;
+        body.rotationPointY = 24.0F - hop * 1.0F - sit * 1.0F;
         body.rotateAngleX = hump * 0.15F - sit * 0.35F;
         hips.rotateAngleX = -hump * 0.35F + sit * 0.3F;
 
@@ -121,10 +123,10 @@ public class ModelSeal extends ModelBase {
             + sleep * 0.2F
             + idle * 0.03F;
         head.rotateAngleZ = MathHelper.sin(ageInTicks * 0.05F) * 0.06F * awake;
-        if (happy) head.rotateAngleZ += MathHelper.sin(ageInTicks * 0.4F) * 0.1F;
+        head.rotateAngleZ += MathHelper.sin(ageInTicks * 0.4F) * 0.1F * happy;
 
         // Flippers: paddle while moving, tuck against the sides when resting or scared, clap when begging.
-        float paddle = MathHelper.cos(phase) * move * 0.7F + idle * 0.06F * awake;
+        float paddle = MathHelper.cos(phase) * move * 0.6F + idle * 0.06F * awake;
         float tuck = Math.max(Math.max(sit, sleep), scared ? 0.6F : 0.0F);
         float flipperYaw = lerp(-0.45F + paddle, -1.2F, tuck);
         float flipperRoll = lerp(0.25F, 1.1F, tuck);
@@ -139,16 +141,18 @@ public class ModelSeal extends ModelBase {
         flipperRight.rotateAngleZ = -flipperRoll;
 
         // The tail wags all the time - fast when happy, barely while asleep, tucked in when scared.
-        float wag;
-        if (happy) {
-            wag = MathHelper.sin(ageInTicks * 0.6F) * 0.3F;
-        } else {
-            wag = MathHelper.sin(ageInTicks * 0.15F) * 0.12F * (1.0F - sleep * 0.8F);
-        }
+        float calmWag = MathHelper.sin(ageInTicks * 0.15F) * 0.12F * (1.0F - sleep * 0.8F);
+        float happyWag = MathHelper.sin(ageInTicks * 0.6F) * 0.3F;
+        float wag = lerp(calmWag, happyWag, happy);
         float spread = scared ? 0.15F : 0.35F;
         tailLeft.rotateAngleY = spread + wag;
         tailRight.rotateAngleY = -spread + wag;
         tailLeft.rotateAngleX = tailRight.rotateAngleX = -hump * 0.4F + 0.1F;
+    }
+
+    /** Smoothstep: starts and ends a pose change gently instead of at constant speed. */
+    static float ease(float t) {
+        return t * t * (3.0F - 2.0F * t);
     }
 
     private static float lerp(float from, float to, float t) {
