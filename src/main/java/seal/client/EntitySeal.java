@@ -15,12 +15,17 @@ import net.minecraft.util.MathHelper;
 import net.minecraft.util.StatCollector;
 import net.minecraft.world.World;
 
+import seal.Seal;
+
 /**
  * A purely client-side pet, ticked and rendered by {@link SealController} rather than the world's entity list. It is
  * never sent to the server, never saved and can't be hit or pushed, but it still walks, jumps, swims and pathfinds
- * around blocks with the regular vanilla AI.
+ * around blocks using the vanilla AI helpers.
  */
 public class EntitySeal extends EntityCreature {
+
+    private int jumpCooldown;
+    private boolean loggedState;
 
     public EntitySeal(World world) {
         super(world);
@@ -87,7 +92,127 @@ public class EntitySeal extends EntityCreature {
             && feet.getCollisionBoundingBoxFromPool(world, x, y, z) == null;
     }
 
-    // --- Client-side simulation: make the entity run its AI and physics locally like a server would ---
+    // --- Client-side simulation ---
+
+    /**
+     * The whole tick of the seal, called by {@link SealController}. Vanilla's living entity update does not move an
+     * entity that only exists on the client, so the AI helpers are driven here and the physics is done by hand, on
+     * top of the same {@link #moveEntity} the player uses (block collisions, step-up, gravity).
+     */
+    @Override
+    public void onUpdate() {
+        prevPosX = posX;
+        prevPosY = posY;
+        prevPosZ = posZ;
+        prevRotationYaw = rotationYaw;
+        prevRotationPitch = rotationPitch;
+        prevRenderYawOffset = renderYawOffset;
+        prevRotationYawHead = rotationYawHead;
+        prevLimbSwingAmount = limbSwingAmount;
+
+        if (posY < -64.0D) {
+            setDead();
+            return;
+        }
+
+        boolean inLiquid = handleWaterMovement() || handleLavaMovement();
+
+        // AI: decide where to go and where to look.
+        tasks.onUpdateTasks();
+        getNavigator().onUpdateNavigation();
+        getMoveHelper().onUpdateMoveHelper();
+        getLookHelper().onUpdateLook();
+        getJumpHelper().doJump();
+
+        if (jumpCooldown > 0) jumpCooldown--;
+        if (isJumping) {
+            if (inLiquid) {
+                motionY += 0.04D;
+            } else if (onGround && jumpCooldown == 0) {
+                jump();
+                jumpCooldown = 10;
+            }
+        }
+
+        moveStrafing *= 0.98F;
+        moveForward *= 0.98F;
+        travel(moveStrafing, moveForward, inLiquid);
+        updateBodyRotation();
+        updateLimbSwing();
+
+        if (!loggedState && ticksExisted == 40) {
+            loggedState = true;
+            Seal.LOG.info(
+                "Seal state after 2s: pos=({}, {}, {}) onGround={} inLiquid={} motion=({}, {}, {}) forward={} path={}",
+                posX,
+                posY,
+                posZ,
+                onGround,
+                inLiquid,
+                motionX,
+                motionY,
+                motionZ,
+                moveForward,
+                !getNavigator().noPath());
+        }
+    }
+
+    private void travel(float strafe, float forward, boolean inLiquid) {
+        if (inLiquid) {
+            double startY = posY;
+            moveFlying(strafe, forward, 0.04F);
+            moveEntity(motionX, motionY, motionZ);
+            motionX *= 0.8D;
+            motionY *= 0.8D;
+            motionZ *= 0.8D;
+            motionY -= 0.02D;
+            if (isCollidedHorizontally && isOffsetPositionInLiquid(motionX, motionY + 0.6D - posY + startY, motionZ)) {
+                motionY = 0.3D;
+            }
+            return;
+        }
+
+        float friction = 0.91F;
+        if (onGround) {
+            Block below = worldObj.getBlock(
+                MathHelper.floor_double(posX),
+                MathHelper.floor_double(boundingBox.minY) - 1,
+                MathHelper.floor_double(posZ));
+            friction = below.slipperiness * 0.91F;
+        }
+        float accel = onGround ? getAIMoveSpeed() * (0.16277136F / (friction * friction * friction)) : 0.02F;
+
+        moveFlying(strafe, forward, accel);
+        moveEntity(motionX, motionY, motionZ);
+
+        motionY -= 0.08D;
+        motionY *= 0.98D;
+        motionX *= friction;
+        motionZ *= friction;
+    }
+
+    /** Body turns towards where the seal walks; the head may look up to 75 degrees away from it. */
+    private void updateBodyRotation() {
+        double dx = posX - prevPosX;
+        double dz = posZ - prevPosZ;
+        if (dx * dx + dz * dz > 0.0025D) {
+            renderYawOffset += MathHelper.wrapAngleTo180_float(rotationYaw - renderYawOffset) * 0.3F;
+        }
+
+        float headOffset = MathHelper.wrapAngleTo180_float(rotationYawHead - renderYawOffset);
+        if (headOffset > 75.0F) renderYawOffset += headOffset - 75.0F;
+        if (headOffset < -75.0F) renderYawOffset += headOffset + 75.0F;
+    }
+
+    private void updateLimbSwing() {
+        double dx = posX - prevPosX;
+        double dz = posZ - prevPosZ;
+        float speed = Math.min(MathHelper.sqrt_double(dx * dx + dz * dz) * 4.0F, 1.0F);
+        limbSwingAmount += (speed - limbSwingAmount) * 0.4F;
+        limbSwing += limbSwingAmount;
+    }
+
+    // Keep vanilla code paths that check these consistent with the seal simulating itself.
 
     @Override
     public boolean isClientWorld() {
