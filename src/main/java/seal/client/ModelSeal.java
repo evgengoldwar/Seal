@@ -3,6 +3,7 @@ package seal.client;
 import net.minecraft.client.model.ModelBase;
 import net.minecraft.client.model.ModelRenderer;
 import net.minecraft.entity.Entity;
+import net.minecraft.entity.EntityLivingBase;
 import net.minecraft.util.MathHelper;
 
 /**
@@ -21,6 +22,10 @@ public class ModelSeal extends ModelBase {
     private final ModelRenderer tailRight;
     private final ModelRenderer flipperLeft;
     private final ModelRenderer flipperRight;
+
+    // Pose of the seal currently being rendered, read from the entity in setLivingAnimations.
+    private float sit, sleep, beg, shake;
+    private boolean happy, scared;
 
     public ModelSeal() {
         textureWidth = 64;
@@ -76,32 +81,77 @@ public class ModelSeal extends ModelBase {
     }
 
     @Override
+    public void setLivingAnimations(EntityLivingBase entity, float limbSwing, float limbSwingAmount,
+        float partialTicks) {
+        EntitySeal seal = (EntitySeal) entity;
+        sit = seal.getSitAmount(partialTicks);
+        sleep = seal.getSleepAmount(partialTicks);
+        beg = seal.getBegAmount(partialTicks);
+        shake = seal.getShakeProgress(partialTicks);
+        happy = seal.isHappy();
+        scared = seal.isScared();
+    }
+
+    @Override
     public void setRotationAngles(float limbSwing, float limbSwingAmount, float ageInTicks, float netHeadYaw,
         float headPitch, float scale, Entity entity) {
+        float awake = 1.0F - sleep;
+        float move = limbSwingAmount * awake;
         float phase = limbSwing * 0.9F;
-        float hump = MathHelper.sin(phase) * limbSwingAmount;
+        float hump = MathHelper.sin(phase) * move;
         float idle = MathHelper.sin(ageInTicks * 0.08F);
 
         // Galumphing: the body rocks back and forth and hops a little, the hips flex the other way.
-        body.rotationPointY = 24.0F - Math.abs(MathHelper.cos(phase)) * limbSwingAmount * 1.2F;
-        body.rotateAngleX = hump * 0.15F;
-        hips.rotateAngleX = -hump * 0.35F;
+        // Sitting lifts the front up like a seal on a rock.
+        body.rotationPointY = 24.0F - Math.abs(MathHelper.cos(phase)) * move * 1.2F - sit * 1.0F;
+        body.rotateAngleX = hump * 0.15F - sit * 0.35F;
+        hips.rotateAngleX = -hump * 0.35F + sit * 0.3F;
 
-        head.rotateAngleY = netHeadYaw * DEG_TO_RAD;
-        head.rotateAngleX = headPitch * DEG_TO_RAD - body.rotateAngleX + idle * 0.03F;
-        head.rotateAngleZ = MathHelper.sin(ageInTicks * 0.05F) * 0.06F;
+        // Shaking off water: a quick side-to-side wiggle that fades in and out. Scared seals shiver.
+        body.rotateAngleZ = 0.0F;
+        if (shake > 0.0F) {
+            body.rotateAngleZ = MathHelper.sin(shake * (float) Math.PI * 6.0F) * 0.3F
+                * MathHelper.sin(shake * (float) Math.PI);
+        }
+        if (scared) body.rotateAngleZ += MathHelper.sin(ageInTicks * 2.5F) * 0.03F;
 
-        // Flippers push the seal forward while moving and gently flap when idle.
-        float paddle = MathHelper.cos(phase) * limbSwingAmount * 0.7F + idle * 0.06F;
-        flipperLeft.rotateAngleY = -0.45F + paddle;
-        flipperLeft.rotateAngleZ = 0.25F;
-        flipperRight.rotateAngleY = 0.45F - paddle;
-        flipperRight.rotateAngleZ = -0.25F;
+        head.rotateAngleY = netHeadYaw * DEG_TO_RAD * awake;
+        head.rotateAngleX = headPitch * DEG_TO_RAD * awake - body.rotateAngleX
+            - sit * 0.15F
+            + sleep * 0.2F
+            + idle * 0.03F;
+        head.rotateAngleZ = MathHelper.sin(ageInTicks * 0.05F) * 0.06F * awake;
+        if (happy) head.rotateAngleZ += MathHelper.sin(ageInTicks * 0.4F) * 0.1F;
 
-        // The tail wags happily all the time.
-        float wag = MathHelper.sin(ageInTicks * 0.15F) * 0.12F;
-        tailLeft.rotateAngleY = 0.35F + wag;
-        tailRight.rotateAngleY = -0.35F + wag;
+        // Flippers: paddle while moving, tuck against the sides when resting or scared, clap when begging.
+        float paddle = MathHelper.cos(phase) * move * 0.7F + idle * 0.06F * awake;
+        float tuck = Math.max(Math.max(sit, sleep), scared ? 0.6F : 0.0F);
+        float flipperYaw = lerp(-0.45F + paddle, -1.2F, tuck);
+        float flipperRoll = lerp(0.25F, 1.1F, tuck);
+
+        float clap = (MathHelper.sin(ageInTicks * 1.2F) * 0.5F + 0.5F) * 0.5F;
+        flipperYaw = lerp(flipperYaw, 0.9F + clap, beg);
+        flipperRoll = lerp(flipperRoll, -0.4F, beg);
+
+        flipperLeft.rotateAngleY = flipperYaw;
+        flipperLeft.rotateAngleZ = flipperRoll;
+        flipperRight.rotateAngleY = -flipperYaw;
+        flipperRight.rotateAngleZ = -flipperRoll;
+
+        // The tail wags all the time - fast when happy, barely while asleep, tucked in when scared.
+        float wag;
+        if (happy) {
+            wag = MathHelper.sin(ageInTicks * 0.6F) * 0.3F;
+        } else {
+            wag = MathHelper.sin(ageInTicks * 0.15F) * 0.12F * (1.0F - sleep * 0.8F);
+        }
+        float spread = scared ? 0.15F : 0.35F;
+        tailLeft.rotateAngleY = spread + wag;
+        tailRight.rotateAngleY = -spread + wag;
         tailLeft.rotateAngleX = tailRight.rotateAngleX = -hump * 0.4F + 0.1F;
+    }
+
+    private static float lerp(float from, float to, float t) {
+        return from + (to - from) * t;
     }
 }

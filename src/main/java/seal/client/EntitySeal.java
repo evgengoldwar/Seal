@@ -9,6 +9,8 @@ import net.minecraft.entity.ai.EntityAILookIdle;
 import net.minecraft.entity.ai.EntityAISwimming;
 import net.minecraft.entity.ai.EntityAIWatchClosest;
 import net.minecraft.entity.player.EntityPlayer;
+import net.minecraft.init.Items;
+import net.minecraft.item.ItemStack;
 import net.minecraft.nbt.NBTTagCompound;
 import net.minecraft.util.DamageSource;
 import net.minecraft.util.MathHelper;
@@ -24,8 +26,29 @@ import seal.Seal;
  */
 public class EntitySeal extends EntityCreature {
 
+    /** Ticks the owner has to stand still before the seal sits down / falls asleep. */
+    private static final int SIT_AFTER = 120;
+    private static final int SLEEP_AFTER = 600;
+    private static final int SHAKE_DURATION = 16;
+
     private int jumpCooldown;
     private boolean loggedState;
+
+    // Mood and pose. The *Amount values fade between 0 and 1 so the model can blend poses smoothly.
+    private float sitAmount, prevSitAmount;
+    private float sleepAmount, prevSleepAmount;
+    private float begAmount, prevBegAmount;
+    private boolean sleeping;
+    private boolean begging;
+    private int idleTicks;
+    private double anchorX, anchorY, anchorZ;
+    private boolean hasAnchor;
+    private int blinkTicks;
+    private int nextBlinkIn = 60;
+    private int happyTicks;
+    private int shakeTicks;
+    private boolean wasFar;
+    private boolean wasInLiquid;
 
     public EntitySeal(World world) {
         super(world);
@@ -36,10 +59,11 @@ public class EntitySeal extends EntityCreature {
         getNavigator().setCanSwim(true);
 
         tasks.addTask(0, new EntityAISwimming(this));
-        tasks.addTask(1, new SealAIFollowPlayer(this, 1.0D, 4.0F, 2.0F));
-        tasks.addTask(2, new SealAIPotter(this, 0.6D));
-        tasks.addTask(3, new EntityAIWatchClosest(this, EntityPlayer.class, 6.0F));
-        tasks.addTask(4, new EntityAILookIdle(this));
+        tasks.addTask(1, new SealAIFollowPlayer(this, 1.0D));
+        tasks.addTask(2, new SealAIBegForFish(this));
+        tasks.addTask(3, new SealAIPotter(this, 0.6D));
+        tasks.addTask(4, new EntityAIWatchClosest(this, EntityPlayer.class, 6.0F));
+        tasks.addTask(5, new EntityAILookIdle(this));
     }
 
     @Override
@@ -54,6 +78,36 @@ public class EntitySeal extends EntityCreature {
     public EntityPlayer getOwner() {
         EntityPlayer player = Minecraft.getMinecraft().thePlayer;
         return player != null && player.worldObj == worldObj && player.isEntityAlive() ? player : null;
+    }
+
+    /**
+     * Squared distance to the player's feet. On the client the local player's posY is at eye level, so the plain
+     * entity distance would be off by 1.6 blocks vertically.
+     */
+    public double getDistanceSqToFeet(EntityPlayer player) {
+        double dx = posX - player.posX;
+        double dy = posY - player.boundingBox.minY;
+        double dz = posZ - player.posZ;
+        return dx * dx + dy * dy + dz * dz;
+    }
+
+    /** Distance at which the seal starts walking after the player. */
+    public float getFollowStartDistance() {
+        EntityPlayer owner = getOwner();
+        if (isScared()) return 1.2F;
+        return owner != null && isHoldingFish(owner) ? 2.5F : 4.0F;
+    }
+
+    /** Distance at which the seal is close enough and stops. In the Nether it hides right under the player. */
+    public float getFollowStopDistance() {
+        EntityPlayer owner = getOwner();
+        if (isScared()) return 0.4F;
+        return owner != null && isHoldingFish(owner) ? 1.5F : 2.0F;
+    }
+
+    public static boolean isHoldingFish(EntityPlayer player) {
+        ItemStack held = player.getHeldItem();
+        return held != null && (held.getItem() == Items.fish || held.getItem() == Items.cooked_fished);
     }
 
     /**
@@ -116,13 +170,22 @@ public class EntitySeal extends EntityCreature {
         }
 
         boolean inLiquid = handleWaterMovement() || handleLavaMovement();
+        updateMood(inLiquid);
 
-        // AI: decide where to go and where to look.
-        tasks.onUpdateTasks();
-        getNavigator().onUpdateNavigation();
-        getMoveHelper().onUpdateMoveHelper();
-        getLookHelper().onUpdateLook();
-        getJumpHelper().doJump();
+        if (sleeping) {
+            // Sound asleep: no thinking, no walking. The owner moving wakes it up (see updateMood).
+            getNavigator().clearPathEntity();
+            moveForward = 0.0F;
+            moveStrafing = 0.0F;
+            isJumping = false;
+        } else {
+            // AI: decide where to go and where to look.
+            tasks.onUpdateTasks();
+            getNavigator().onUpdateNavigation();
+            getMoveHelper().onUpdateMoveHelper();
+            getLookHelper().onUpdateLook();
+            getJumpHelper().doJump();
+        }
 
         if (jumpCooldown > 0) jumpCooldown--;
         if (isJumping) {
@@ -155,6 +218,150 @@ public class EntitySeal extends EntityCreature {
                 moveForward,
                 !getNavigator().noPath());
         }
+    }
+
+    private void updateMood(boolean inLiquid) {
+        prevSitAmount = sitAmount;
+        prevSleepAmount = sleepAmount;
+        prevBegAmount = begAmount;
+
+        if (blinkTicks > 0) {
+            blinkTicks--;
+        } else if (--nextBlinkIn <= 0) {
+            blinkTicks = 3;
+            nextBlinkIn = 50 + rand.nextInt(100);
+        }
+        if (happyTicks > 0) happyTicks--;
+        if (shakeTicks > 0) {
+            shakeTicks--;
+            if (shakeTicks % 2 == 0) spawnParticles("splash", 3, 0.0D);
+        }
+
+        EntityPlayer owner = getOwner();
+        double distSq = owner != null ? getDistanceSqToFeet(owner) : Double.MAX_VALUE;
+        if (owner != null) {
+            // Is the owner standing still? Small fidgeting doesn't count.
+            double dx = owner.posX - anchorX, dy = owner.boundingBox.minY - anchorY, dz = owner.posZ - anchorZ;
+            if (!hasAnchor || dx * dx + dy * dy + dz * dz > 0.36D) {
+                anchorX = owner.posX;
+                anchorY = owner.boundingBox.minY;
+                anchorZ = owner.posZ;
+                hasAnchor = true;
+                idleTicks = 0;
+            } else {
+                idleTicks++;
+            }
+            // Fish wakes anyone up.
+            if (isHoldingFish(owner) && distSq < 64.0D) idleTicks = 0;
+
+            // Reunited after being left behind (or teleported back): happy hop.
+            if (distSq > 100.0D) {
+                wasFar = true;
+            } else if (wasFar && distSq < 9.0D) {
+                wasFar = false;
+                celebrate();
+            }
+        }
+
+        boolean canRest = owner != null && !isScared()
+            && !begging
+            && !inLiquid
+            && onGround
+            && distSq < 49.0D
+            && getNavigator().noPath();
+        sleeping = canRest && idleTicks > SLEEP_AFTER;
+        boolean sitting = begging || canRest && idleTicks > SIT_AFTER && !sleeping;
+
+        sitAmount = approach(sitAmount, sitting ? 1.0F : 0.0F, 0.1F);
+        sleepAmount = approach(sleepAmount, sleeping ? 1.0F : 0.0F, 0.05F);
+        begAmount = approach(begAmount, begging ? 1.0F : 0.0F, 0.15F);
+
+        // Seals love water: shake off after a swim, and enjoy the rain.
+        if (wasInLiquid && !inLiquid) startShake();
+        wasInLiquid = inLiquid;
+        if (isInRain()) {
+            happyTicks = Math.max(happyTicks, 10);
+            if (rand.nextInt(3) == 0) spawnParticles("splash", 1, height);
+            if (!sleeping && shakeTicks == 0 && rand.nextInt(160) == 0) startShake();
+        }
+    }
+
+    private static float approach(float value, float target, float step) {
+        return value < target ? Math.min(value + step, target) : Math.max(value - step, target);
+    }
+
+    private void celebrate() {
+        happyTicks = 40;
+        idleTicks = 0;
+        if (onGround) motionY = 0.4D;
+        spawnParticles("heart", 5, height);
+    }
+
+    private void startShake() {
+        shakeTicks = SHAKE_DURATION;
+    }
+
+    private boolean isInRain() {
+        int x = MathHelper.floor_double(posX);
+        int y = MathHelper.floor_double(posY);
+        int z = MathHelper.floor_double(posZ);
+        return worldObj.canLightningStrikeAt(x, y, z)
+            || worldObj.canLightningStrikeAt(x, MathHelper.floor_double(posY + height), z);
+    }
+
+    private void spawnParticles(String name, int count, double yOffset) {
+        for (int i = 0; i < count; i++) {
+            worldObj.spawnParticle(
+                name,
+                posX + (rand.nextDouble() - 0.5D) * width * 1.5D,
+                posY + yOffset + rand.nextDouble() * 0.3D,
+                posZ + (rand.nextDouble() - 0.5D) * width * 1.5D,
+                rand.nextGaussian() * 0.05D,
+                0.1D,
+                rand.nextGaussian() * 0.05D);
+        }
+    }
+
+    // --- State read by the AI, model and renderer ---
+
+    /** Too scared to wander off or nap: the Nether is no place for a seal. */
+    public boolean isScared() {
+        return worldObj.provider.isHellWorld;
+    }
+
+    public boolean canWander() {
+        return !isScared() && !begging && sitAmount == 0.0F && sleepAmount == 0.0F;
+    }
+
+    public void setBegging(boolean begging) {
+        this.begging = begging;
+        if (begging) idleTicks = 0;
+    }
+
+    public boolean isHappy() {
+        return happyTicks > 0;
+    }
+
+    public boolean areEyesClosed() {
+        return blinkTicks > 0 || sleepAmount > 0.6F;
+    }
+
+    public float getSitAmount(float partialTicks) {
+        return prevSitAmount + (sitAmount - prevSitAmount) * partialTicks;
+    }
+
+    public float getSleepAmount(float partialTicks) {
+        return prevSleepAmount + (sleepAmount - prevSleepAmount) * partialTicks;
+    }
+
+    public float getBegAmount(float partialTicks) {
+        return prevBegAmount + (begAmount - prevBegAmount) * partialTicks;
+    }
+
+    /** 0..1 through the current shake, or 0 if not shaking. */
+    public float getShakeProgress(float partialTicks) {
+        if (shakeTicks <= 0) return 0.0F;
+        return Math.min((SHAKE_DURATION - shakeTicks + partialTicks) / SHAKE_DURATION, 1.0F);
     }
 
     private void travel(float strafe, float forward, boolean inLiquid) {

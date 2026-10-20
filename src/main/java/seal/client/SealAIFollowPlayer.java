@@ -19,24 +19,22 @@ public class SealAIFollowPlayer extends EntityAIBase {
 
     private final EntitySeal seal;
     private final double speed;
-    private final double startDistSq;
-    private final double stopDistSq;
 
     private EntityPlayer owner;
     private int repathTimer;
 
-    public SealAIFollowPlayer(EntitySeal seal, double speed, float startDist, float stopDist) {
+    public SealAIFollowPlayer(EntitySeal seal, double speed) {
         this.seal = seal;
         this.speed = speed;
-        this.startDistSq = startDist * startDist;
-        this.stopDistSq = stopDist * stopDist;
         setMutexBits(3);
     }
 
     @Override
     public boolean shouldExecute() {
         EntityPlayer player = seal.getOwner();
-        if (player == null || seal.getDistanceSqToEntity(player) < startDistSq) return false;
+        if (player == null) return false;
+        float startDist = seal.getFollowStartDistance();
+        if (seal.getDistanceSqToFeet(player) < startDist * startDist) return false;
         owner = player;
         return true;
     }
@@ -46,7 +44,12 @@ public class SealAIFollowPlayer extends EntityAIBase {
         return owner != null && owner == seal.getOwner()
             && !seal.getNavigator()
                 .noPath()
-            && seal.getDistanceSqToEntity(owner) > stopDistSq;
+            && seal.getDistanceSqToFeet(owner) > stopDistSq();
+    }
+
+    private double stopDistSq() {
+        float stopDist = seal.getFollowStopDistance();
+        return stopDist * stopDist;
     }
 
     @Override
@@ -69,7 +72,7 @@ public class SealAIFollowPlayer extends EntityAIBase {
         if (--repathTimer > 0) return;
         repathTimer = 10;
 
-        double distSq = seal.getDistanceSqToEntity(owner);
+        double distSq = seal.getDistanceSqToFeet(owner);
         if (distSq >= FORCE_TELEPORT_DIST_SQ && seal.moveNextTo(owner)) return;
 
         PathNavigate navigator = seal.getNavigator();

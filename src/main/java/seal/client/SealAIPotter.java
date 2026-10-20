@@ -25,10 +25,10 @@ public class SealAIPotter extends EntityAIBase {
     @Override
     public boolean shouldExecute() {
         Random rand = seal.getRNG();
-        if (rand.nextInt(100) != 0) return false;
+        if (rand.nextInt(100) != 0 || !seal.canWander()) return false;
 
         EntityPlayer owner = seal.getOwner();
-        if (owner == null || seal.getDistanceSqToEntity(owner) > 36.0D) return false;
+        if (owner == null || EntitySeal.isHoldingFish(owner) || seal.getDistanceSqToFeet(owner) > 36.0D) return false;
 
         int baseX = MathHelper.floor_double(owner.posX);
         int baseY = MathHelper.floor_double(owner.boundingBox.minY);
@@ -57,7 +57,7 @@ public class SealAIPotter extends EntityAIBase {
 
     @Override
     public boolean continueExecuting() {
-        return !seal.getNavigator()
+        return seal.canWander() && !seal.getNavigator()
             .noPath();
     }
 }
